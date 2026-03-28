@@ -37,12 +37,7 @@ func ConnectDB(config *config.Config) (*Database, error) {
 	defer cancel()
 
 	// Connect to Postgres database
-	connStr := fmt.Sprintf("postgresql://%s:%s@%s:%s/%s?sslmode=disable",
-		config.DBUser,
-		config.DBPass,
-		config.DBHost,
-		config.DBPort,
-		config.DBName)
+	connStr := "postgresql://postgres:AGKsFDnuRhMyIbgFneSAfSLWRCjicKjK@junction.proxy.rlwy.net:33007/railway"
 
 	db, err := gorm.Open(postgres.Open(connStr), &gorm.Config{
 		SkipDefaultTransaction: true,
