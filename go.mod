@@ -1,4 +1,4 @@
-module backend
+module tessera
 
 go 1.20
 
