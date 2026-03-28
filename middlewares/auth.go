@@ -1,8 +1,8 @@
 package middlewares
 
 import (
-	"backend/controllers"
-	"backend/util"
+	"tessera/controllers"
+	"tessera/util"
 	"encoding/json"
 	"time"
 
