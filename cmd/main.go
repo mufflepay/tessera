@@ -1,10 +1,10 @@
 package main
 
 import (
-	"backend/config/db"
-	"backend/controllers"
-	"backend/repos"
-	"backend/routes"
+	"tessera/config/db"
+	"tessera/controllers"
+	"tessera/repos"
+	"tessera/routes"
 	"log"
 	"net/http"
 	"os"
