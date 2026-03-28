@@ -1,8 +1,8 @@
 package db
 
 import (
-	"backend/config"
-	"backend/models"
+	"tessera/config"
+	"tessera/models"
 	"context"
 	"errors"
 	"fmt"
