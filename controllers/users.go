@@ -1,9 +1,9 @@
 package controllers
 
 import (
-	"backend/models"
-	"backend/repos"
-	"backend/util"
+	"tessera/models"
+	"tessera/repos"
+	"tessera/util"
 	"context"
 	"fmt"
 	"time"
