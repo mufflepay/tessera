@@ -1,11 +1,11 @@
 package controllers
 
 import (
-	"backend/config"
-	"backend/models"
-	"backend/models/dtos"
-	"backend/repos"
-	"backend/util"
+	"tessera/config"
+	"tessera/models"
+	"tessera/models/dtos"
+	"tessera/repos"
+	"tessera/util"
 	"context"
 	"encoding/json"
 	"fmt"
