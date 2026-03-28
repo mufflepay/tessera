@@ -1,7 +1,7 @@
 package routes
 
 import (
-	"backend/controllers"
+	"tessera/controllers"
 
 	"github.com/gofiber/fiber/v2"
 )
