@@ -1,0 +1,352 @@
+
+
+// ValidateMap to validate the fields=>map[string]interface{}
+func (r *ticketRepository) PatchTicket(ctx context.Context, ticketID uuid.UUID, fields map[string]interface{}) (*models.Ticket, error) {
+
+	tx := r.db.Begin()
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// Build the query
+	query := "UPDATE tickets SET"
+	params := []interface{}{}
+	i := 1
+	numFields := len(fields)
+	validKeys := map[string]bool{
+		"ticket_id":    true,
+		"subject":      true,
+		"description":  true,
+		"request_type": true,
+		"status":       true,
+		"priority":     true,
+		"assigned_to":  true,
+		"assigned_by":  true,
+		"created_by":   true,
+		"due_date":     true,
+		"notes":        true,
+		"attachments":  true,
+		"created_on":   true,
+		"modified_on":  true,
+	}
+	for k, v := range fields {
+		if _, ok := validKeys[k]; !ok {
+			fmt.Printf("#1 => invalid ticket field: %s", k)
+			continue
+		}
+		// Don't update the created_by, created_on, due_date fields (excludeKeys)
+		query += fmt.Sprintf(" %s = ?", k)
+		params = append(params, v)
+		if i < numFields {
+			query += ","
+		}
+		i++
+	}
+
+	query += ", modified_on = ? WHERE ticket_id = ? RETURNING ticket_id, subject, description, request_type, assigned_to, assigned_by, created_by, due_date, created_on, modified_on"
+
+	// Add the ticketID to the params
+	params = append(params, time.Now())
+	params = append(params, ticketID)
+
+	// Execute the query
+	rows, err := tx.Raw(query, params...).Rows()
+	if err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("error patching ticket: %v", err)
+	}
+	defer rows.Close()
+
+	// Scan the result into a new ticket struct
+	ticket := &models.Ticket{}
+	for rows.Next() {
+		if err := rows.Scan(&ticket.TicketID, &ticket.Subject, &ticket.Description, &ticket.RequestType, &ticket.AssignedTo, &ticket.AssignedBy, &ticket.CreatedBy, &ticket.DueDate, &ticket.CreatedOn, &ticket.ModifiedOn); err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("error scanning ticket: %v", err)
+		}
+	}
+
+	// Build the query to update the notes
+	validNotesKeys := map[string]bool{
+		"notes":       true,
+		"note_id":     true,
+		"ticket_id":   true,
+		"content":     true,
+		"author":      true,
+		"created_on":  true,
+		"modified_on": true,
+	}
+
+	p := patcher.NewPatch(
+		patcher.WithTableName("notes"),
+		patcher.WithId(ticketID),
+		patcher.WithFields(fields),
+		patcher.WithValidKeys(validNotesKeys),
+		patcher.WithNested("notes"),
+	)
+
+	notesQuery, args, err := p.GetQuery()
+	if err != nil {
+		log.Printf("error generating patch query: %v", err)
+	}
+
+	// Execute the query
+	if len(args) > 1 {
+		rows, err = tx.Raw(notesQuery, args...).Rows()
+		if err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("error patching ticket: %v", err)
+		}
+		defer func(rows *sql.Rows) {
+			err := rows.Close()
+			if err != nil {
+
+			}
+		}(rows)
+
+		// Scan the result into a new note struct
+		note := &models.Note{}
+		for rows.Next() {
+			if err := rows.Scan(&note); err != nil {
+				tx.Rollback()
+				return nil, fmt.Errorf("error scanning note: %v", err)
+			}
+
+			// Append the note to the ticket
+			ticket.Notes = append(ticket.Notes, note)
+		}
+	}
+
+	// Build the query to update the ticket attachments
+	query = "UPDATE attachments SET"
+	attachmentsParams := []interface{}{}
+	validAttachmentsKeys := map[string]bool{
+		"attachments":   true,
+		"attachment_id": true,
+		"ticket_id":     true,
+		"file_name":     true,
+		"file_type":     true,
+		"file_size":     true,
+		"file_path":     true,
+		"created_on":    true,
+	}
+
+	for k := range fields {
+		if _, ok := validAttachmentsKeys[k]; !ok {
+			fmt.Printf("#1 => invalid attachment field: %s", k)
+			continue
+		}
+		if k == "attachments" {
+			for _, attachment := range fields[k].([]interface{}) {
+				attachmentMap := attachment.(map[string]interface{})
+				numAttachmentFields := len(attachmentMap)
+				attachmentI := 1
+				for k, v := range attachmentMap {
+					if _, ok := validAttachmentsKeys[k]; !ok {
+						fmt.Printf("#2 => invalid attachment field: %s", k)
+						continue
+					}
+					query += fmt.Sprintf(" %s = ?", k)
+					attachmentsParams = append(attachmentsParams, v)
+					if attachmentI < numAttachmentFields {
+						query += ","
+					}
+					attachmentI++
+				}
+			}
+		} else {
+			query += fmt.Sprintf(" %s = ?,", k)
+			attachmentsParams = append(attachmentsParams, fields[k])
+		}
+	}
+
+	query = strings.TrimSuffix(query, ",") // remove the last comma if it exists
+	query += " WHERE ticket_id = ? RETURNING attachment_id, ticket_id, file_name, file_type, file_size, file_path, created_on"
+
+	// Add the ticketID to the params
+	attachmentsParams = append(attachmentsParams, ticketID)
+
+	if len(attachmentsParams) > 1 {
+		// Execute the query
+		rows, err = tx.Raw(query, attachmentsParams...).Rows()
+		if err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("error patching ticket: %v", err)
+		}
+		defer rows.Close()
+
+		// Scan the result into a new attachment struct
+		attachment := &models.Attachment{}
+		for rows.Next() {
+			if err := rows.Scan(&attachment.AttachmentID, &attachment.TicketID, &attachment.FileName, &attachment.FileType, &attachment.FileSize, &attachment.FilePath, &attachment.CreatedOn); err != nil {
+				tx.Rollback()
+				return nil, fmt.Errorf("error scanning attachment: %v", err)
+			}
+
+			// Append the attachment to the ticket
+			ticket.Attachments = append(ticket.Attachments, attachment)
+		}
+
+	}
+
+	// Build the query to update the ticket statuses
+	query = "UPDATE ticket_statuses SET"
+	statusesParams := []interface{}{}
+	validStatusesKeys := map[string]bool{
+		"status":      true,
+		"status_id":   true,
+		"ticket_id":   true,
+		"old_status":  true,
+		"new_status":  true,
+		"changed_by":  true,
+		"created_on":  true,
+		"modified_on": true,
+	}
+
+	for k := range fields {
+		if _, ok := validStatusesKeys[k]; !ok {
+			fmt.Printf("#1 => invalid status field: %s", k)
+			continue
+		}
+		if k == "status" {
+			for _, status := range fields[k].([]interface{}) {
+				statusMap := status.(map[string]interface{})
+				numStatusFields := len(statusMap)
+				statusI := 1
+				for k, v := range statusMap {
+					if _, ok := validStatusesKeys[k]; !ok {
+						fmt.Printf("#2 => invalid status field: %s", k)
+						continue
+					}
+					query += fmt.Sprintf(" %s = ?", k)
+					statusesParams = append(statusesParams, v)
+					if statusI < numStatusFields {
+						query += ","
+					}
+					statusI++
+				}
+			}
+		} else {
+			query += fmt.Sprintf(" %s = ?,", k)
+			statusesParams = append(statusesParams, fields[k])
+		}
+	}
+
+	// Remove the last comma if it exists from the query
+	query = strings.TrimSuffix(query, ",")
+
+	// Add WHERE clause to the query
+	query += ", old_status = (SELECT new_status FROM ticket_statuses WHERE ticket_id = ?)  , modified_on = ? WHERE ticket_id = ? RETURNING status_id, ticket_id, old_status, new_status, changed_by, created_on, modified_on"
+
+	// Add the ticketID to the params
+	statusesParams = append(statusesParams, ticketID)
+	statusesParams = append(statusesParams, time.Now())
+	statusesParams = append(statusesParams, ticketID)
+
+	if len(statusesParams) > 3 {
+		// Execute the query
+		rows, err = tx.Raw(query, statusesParams...).Rows()
+		if err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("error patching ticket status: %v", err)
+		}
+		defer rows.Close()
+
+		// Scan the result into a new ticket status struct
+		for rows.Next() {
+			status := &models.TicketStatus{}
+			if err := rows.Scan(&status.StatusID, &status.TicketID, &status.OldStatus, &status.NewStatus, &status.ChangedBy, &status.CreatedOn, &status.ModifiedOn); err != nil {
+				tx.Rollback()
+				return nil, fmt.Errorf("error scanning ticket status: %v", err)
+			}
+
+			// Append the status to the ticket
+			ticket.Status = status
+		}
+	}
+
+	// Build the query to update the ticket priorities
+	query = "UPDATE ticket_priorities SET"
+	prioritiesParams := []interface{}{}
+	validPrioritiesKeys := map[string]bool{
+		"priority":     true,
+		"priority_id":  true,
+		"ticket_id":    true,
+		"old_priority": true,
+		"new_priority": true,
+		"changed_by":   true,
+		"created_on":   true,
+		"modified_on":  true,
+	}
+	for k := range fields {
+		if _, ok := validPrioritiesKeys[k]; !ok {
+			fmt.Printf("#1 => invalid priority field: %s", k)
+			continue
+		}
+		if k == "priority" {
+			for _, priority := range fields[k].([]interface{}) {
+				priorityMap := priority.(map[string]interface{})
+				numPriorityFields := len(priorityMap)
+				priorityI := 1
+				for k, v := range priorityMap {
+					if _, ok := validPrioritiesKeys[k]; !ok {
+						fmt.Printf("#2 => invalid priority field: %s", k)
+						continue
+					}
+					query += fmt.Sprintf(" %s = ?", k)
+					prioritiesParams = append(prioritiesParams, v)
+					if priorityI < numPriorityFields {
+						query += ","
+					}
+					priorityI++
+				}
+			}
+		} else {
+			query += fmt.Sprintf(" %s = ?,", k)
+			prioritiesParams = append(prioritiesParams, fields[k])
+		}
+	}
+
+	// Remove the last comma if it exists from the query
+	query = strings.TrimSuffix(query, ",")
+
+	// Add WHERE clause to the query
+	query += ", old_priority = (SELECT new_priority FROM ticket_priorities WHERE ticket_id = ?)  , modified_on = ? WHERE ticket_id = ? RETURNING priority_id, ticket_id, old_priority, new_priority, changed_by, created_on, modified_on"
+
+	// Add the ticketID to the params
+	prioritiesParams = append(prioritiesParams, ticketID)
+	prioritiesParams = append(prioritiesParams, time.Now())
+	prioritiesParams = append(prioritiesParams, ticketID)
+
+	if len(prioritiesParams) > 3 {
+		// Execute the query
+		rows, err = tx.Raw(query, prioritiesParams...).Rows()
+		if err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("error patching ticket priority: %v", err)
+		}
+		defer rows.Close()
+
+		// Scan the result into a new ticket priority struct
+		for rows.Next() {
+			priority := &models.TicketPriority{}
+			if err := rows.Scan(&priority.PriorityID, &priority.TicketID, &priority.OldPriority, &priority.NewPriority, &priority.ChangedBy, &priority.CreatedOn, &priority.ModifiedOn); err != nil {
+				tx.Rollback()
+				return nil, fmt.Errorf("error scanning ticket priority: %v", err)
+			}
+
+			// Append the priority to the ticket
+			ticket.Priority = priority
+		}
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("error committing transaction: %v", err)
+	}
+
+	return ticket, nil
+}
+

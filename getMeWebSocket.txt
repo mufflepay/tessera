@@ -1,0 +1,89 @@
+package controllers
+
+import (
+	"backend/models"
+	"backend/repos"
+	"backend/util"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
+	"github.com/labstack/echo/v4"
+)
+
+type UserController interface {
+	GetMe(c echo.Context) error
+	// GetUser(ctx *fiber.Ctx) error
+	// GetUsers(ctx *fiber.Ctx) error
+	// PutUser(ctx *fiber.Ctx) error
+	// DeleteUser(ctx *fiber.Ctx) error
+}
+
+type userController struct {
+	userRepo repos.IUserRepository
+}
+
+func NewUserController(userRepo repos.IUserRepository) UserController {
+	return &userController{userRepo}
+}
+
+var upgrader = websocket.Upgrader{}
+
+func (u *userController) GetMe(c echo.Context) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	session, err := util.GetRedisSession(c.Request())
+	if err != nil {
+		log.Fatal("failed to retrieve session: ", err)
+	}
+
+	var val *SessionValues
+
+	if session.Values["user_values"] == nil {
+		session.Options.MaxAge = -1
+		session.Save(c.Request(), c.Response())
+		return c.JSON(http.StatusUnauthorized, "Unauthorized")
+	}
+
+	userVal := session.Values["user_values"].([]byte)
+
+	err = json.Unmarshal(userVal, &val)
+	if err != nil {
+		fmt.Println("error:", err)
+	}
+
+	userIDToUUID := uuid.MustParse(val.UserID)
+
+	fmt.Println("user id: ", userIDToUUID)
+
+	// TODO: exclude password
+	user, err := u.userRepo.GetMe(ctx, userIDToUUID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, "get me error")
+	}
+
+	if user == (models.User{}) {
+		return c.JSON(http.StatusNotFound, "User not found")
+	}
+
+	ws, err := upgrader.Upgrade(c.Response(), c.Request(), nil)
+	if err != nil {
+		log.Fatal("upgrade error: ", err)
+	}
+	defer ws.Close()
+
+	for {
+		err = ws.WriteJSON(user)
+		if err != nil {
+			c.Logger().Error(err)
+		}
+
+		// time.Sleep(3 * time.Second)
+	}
+}

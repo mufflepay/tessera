@@ -1,0 +1,32 @@
+Session management including protections:
+- Active device monitoring
+* device - Windows etc {active? This device}
+* client - Chrome version no.
+* ip address - 192.185.112.24 (Johannesburg, ZA)
+* date - Today at 2:07pm
+
+- Session revocation
+- Session fixation protection
+- XSS leak protection
+- CSRF protection
+
+* Maybe... cause its diffuct to implement
+- Active session monitoring
+- Session audit logs
+
+User management for admin
+- view users
+- create users
+- search users
+- reset pass
+-change/assign roles
+- columns
+* name
+* joined
++ roles 
+* last signed in
+* user options
+** view profile
+** impersonate user - optional
+** ban user
+** remove user

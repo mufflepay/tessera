@@ -1,0 +1,35 @@
+
+
+
+func AuthMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
+    return func(c echo.Context) error {
+        session, err := store.Get(c.Request(), "session")
+        if err != nil {
+            log.Fatal("failed to get session: ", err)
+        }
+
+		// Optional: Check if the user is authenticated
+		// if auth, ok := session.Values["authenticated"].(bool); !ok || !auth {
+        //    return echo.NewHTTPError(http.StatusUnauthorized, "Unauthorized")
+        // }
+
+        if session.Values["userID"] == nil {
+            session.Options.MaxAge = -1
+            session.Save(c.Request(), c.Response())
+            return c.JSON(http.StatusUnauthorized, "Unauthorized")
+        }
+
+
+        userID := session.Values["userID"].(string)
+
+        // TODO: Check if the user exists in the db
+
+        if !userExists {
+            session.Options.MaxAge = -1
+            session.Save(c.Request(), c.Response())
+            return c.JSON(http.StatusUnauthorized, "Unauthorized")
+        }
+
+        return next(c)
+    }
+}

@@ -1,0 +1,95 @@
+package models
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// ==== ENTITIES ==== //
+type Ticket struct {
+	TicketID          uuid.UUID           `json:"ticket_id" gorm:"column:ticket_id;primaryKey;not null;index;type:uniqueidentifier;default:NEWID()" validate:"omitempty,uuid4"`
+	TicketNumber      int                 `json:"ticket_number" gorm:"column:ticket_number;not null;index;unique" validate:"required"`
+	ReferenceNumber   uuid.UUID           `json:"reference_number" gorm:"column:reference_number;not null;index;unique" validate:"required"`
+	Subject           string              `json:"subject" gorm:"type:varchar(255);not null;index" validate:"required"`
+	Description       string              `json:"description" gorm:"type:text;not null" validate:"required"`
+	RequestType       string              `json:"request_type" gorm:"type:varchar(50);not null;index" validate:"required"`
+	Status            *TicketStatus       `json:"status" gorm:"foreignKey:TicketID"`
+	Priority          *TicketPriority     `json:"priority" gorm:"foreignKey:TicketID"`
+	AssignedTo        string              `json:"assigned_to" gorm:"type:varchar(50);not null;index" validate:"required"`
+	AssignedBy        string              `json:"assigned_by" gorm:"type:varchar(50);not null;index" validate:"required"`
+	CreatedBy         string              `json:"created_by" gorm:"type:varchar(50);not null;index" validate:"required"`
+	DueDate           time.Time           `json:"due_date" gorm:"column:due_date;not null;default:GETDATE()" validate:"required"`
+	ReOpenedOn        time.Time           `json:"reopened_on" gorm:"column:reopened_on;not null;default:GETDATE()" validate:"required"`
+	ArchivedOn        time.Time           `json:"archived_on" gorm:"column:archived_on;not null;default:GETDATE()" validate:"required"`
+	Rating            *TicketRating       `json:"ratings" gorm:"foreignKey:TicketID"`
+	SLA               *TicketSLA          `json:"sla" gorm:"foreignKey:TicketID"`
+	ResolutionSummary string              `json:"resolution_summary" gorm:"type:text;not null" validate:"required"`
+	Notes             []*TicketNote       `json:"notes" gorm:"foreignKey:TicketID"`
+	Attachments       []*TicketAttachment `json:"attachments" gorm:"foreignKey:TicketID"`
+	RelatedTickets    []*TicketRelated    `json:"related_tickets" gorm:"foreignKey:TicketID"`
+	CreatedOn         time.Time           `json:"created_on" gorm:"column:created_on;not null;default:GETDATE()" validate:"required"`
+	ModifiedOn        time.Time           `json:"modified_on" gorm:"column:modified_on;not null;default:GETDATE()" validate:"required"`
+	DeletedOn         time.Time           `json:"deleted_on" gorm:"column:deleted_on;not null;default:GETDATE()" validate:"required"` // soft delete
+	// ClosedOn  use the status history to get the closed date
+}
+
+type TicketNote struct {
+	NoteID    uuid.UUID `json:"note_id" gorm:"primaryKey;index;type:uniqueidentifier;default:NEWID();"`
+	TicketID  uuid.UUID `json:"ticket_id"`
+	Content   string    `json:"content" gorm:"column:content"`
+	Author    string    `json:"author" gorm:"column:author"`
+	CreatedOn time.Time `json:"created_on" gorm:"column:created_on;not null;default:GETDATE()" validate:"required"`
+}
+
+type TicketAttachment struct {
+	AttachmentID uuid.UUID `json:"attachment_id" gorm:"primaryKey;index;type:uniqueidentifier;default:NEWID();"`
+	TicketID     uuid.UUID `json:"ticket_id"`
+	FileName     string    `json:"file_name" gorm:"column:file_name"`
+	FilePath     string    `json:"file_path" gorm:"column:file_path"`
+	FileType     string    `json:"file_type" gorm:"column:file_type"`
+	FileSize     int       `json:"file_size" gorm:"column:file_size"`
+	CreatedOn    time.Time `json:"created_on" gorm:"column:created_on;not null;default:GETDATE()" validate:"required"`
+}
+
+type TicketStatus struct {
+	StatusID   uuid.UUID `json:"status_id" gorm:"primaryKey;index;type:uniqueidentifier;default:NEWID();"`
+	TicketID   uuid.UUID `json:"ticket_id"`
+	OldStatus  string    `json:"old_status" gorm:"type:varchar(20)" validate:"required"`
+	NewStatus  string    `json:"new_status" gorm:"type:varchar(20);not null;index;default:Open" validate:"required"`
+	ChangedBy  string    `json:"changed_by" gorm:"type:varchar(50);not null;index" validate:"required"`
+	CreatedOn  time.Time `json:"created_on" gorm:"column:created_on;not null;default:GETDATE()" validate:"required"`
+	ModifiedOn time.Time `json:"modified_on" gorm:"column:modified_on;not null;default:GETDATE()" validate:"required"`
+}
+
+type TicketPriority struct {
+	PriorityID  uuid.UUID `json:"priority_id" gorm:"primaryKey;index;type:uniqueidentifier;default:NEWID();"`
+	TicketID    uuid.UUID `json:"ticket_id"`
+	OldPriority string    `json:"old_priority" gorm:"type:varchar(20)" validate:"required"`
+	NewPriority string    `json:"new_priority" gorm:"type:varchar(20);not null;index;default:High" validate:"required"`
+	ChangedBy   string    `json:"changed_by" gorm:"type:varchar(50);not null;index" validate:"required"`
+	CreatedOn   time.Time `json:"created_on" gorm:"column:created_on;not null;default:GETDATE()" validate:"required"`
+	ModifiedOn  time.Time `json:"modified_on" gorm:"column:modified_on;not null;default:GETDATE()" validate:"required"`
+}
+
+type TicketRating struct {
+	RatingID uuid.UUID `json:"rating_id" gorm:"primaryKey;index;type:uniqueidentifier;default:NEWID();"`
+	TicketID uuid.UUID `json:"ticket_id"`
+	UserID   uuid.UUID `json:"user_id"`
+	Rating   int       `json:"rating" gorm:"type:integer;not null;index" validate:"required"`
+	Feedback string    `json:"feedback" gorm:"type:text;not null" validate:"required"`
+}
+
+type TicketSLA struct {
+	SLAID          uuid.UUID     `json:"sla_id" gorm:"primaryKey;index;type:uniqueidentifier;default:NEWID();"`
+	TicketID       uuid.UUID     `json:"ticket_id"`
+	AgreementType  string        // type of SLA agreement (e.g. Gold, Silver, Bronze, None)
+	ResponseTime   time.Duration // expected response time
+	ResolutionTime time.Duration // expected resolution time
+	IsViolated     bool          // is SLA violated
+}
+
+type TicketRelated struct {
+	RelatedID uuid.UUID `json:"rating_id" gorm:"primaryKey;index;type:uniqueidentifier;default:NEWID();"`
+	TicketID  uuid.UUID `json:"ticket_id"`
+}

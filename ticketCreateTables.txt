@@ -1,0 +1,83 @@
+CREATE TABLE Ticket (
+    TicketID uniqueidentifier NOT NULL PRIMARY KEY,
+    TicketNumber int NOT NULL,
+    ReferenceNumber uniqueidentifier NOT NULL,
+    Subject nvarchar(max) NOT NULL,
+    Description nvarchar(max) NOT NULL,
+    RequestType nvarchar(max) NOT NULL,
+    StatusID uniqueidentifier NOT NULL FOREIGN KEY REFERENCES TicketStatus(StatusID),
+    PriorityID uniqueidentifier NOT NULL FOREIGN KEY REFERENCES TicketPriority(PriorityID),
+    AssignedTo nvarchar(max) NOT NULL,
+    AssignedBy nvarchar(max) NOT NULL,
+    CreatedBy nvarchar(max) NOT NULL,
+    DueDate datetime2 NOT NULL,
+    ReOpenedOn datetime2 NULL,
+    ArchivedOn datetime2 NULL,
+    ResolutionSummary nvarchar(max) NULL,
+    RatingID uniqueidentifier NULL FOREIGN KEY REFERENCES TicketRating(RatingID),
+    SLAID uniqueidentifier NULL FOREIGN KEY REFERENCES TicketSLA(SLAID),
+    CreatedOn datetime2 NOT NULL,
+    ModifiedOn datetime2 NOT NULL,
+    DeletedOn datetime2 NULL
+);
+
+CREATE TABLE TicketNote (
+    NoteID uniqueidentifier NOT NULL PRIMARY KEY,
+    TicketID uniqueidentifier NOT NULL FOREIGN KEY REFERENCES Ticket(TicketID),
+    Content nvarchar(max) NOT NULL,
+    Author nvarchar(max) NOT NULL,
+    CreatedOn datetime2 NOT NULL
+);
+
+CREATE TABLE TicketAttachment (
+    AttachmentID uniqueidentifier NOT NULL PRIMARY KEY,
+    TicketID uniqueidentifier NOT NULL FOREIGN KEY REFERENCES Ticket(TicketID),
+    FileName nvarchar(max) NOT NULL,
+    FilePath nvarchar(max) NOT NULL,
+    FileType nvarchar(max) NOT NULL,
+    FileSize int NOT NULL,
+    CreatedOn datetime2 NOT NULL
+);
+
+CREATE TABLE TicketStatus (
+    StatusID uniqueidentifier NOT NULL PRIMARY KEY,
+    TicketID uniqueidentifier NOT NULL FOREIGN KEY REFERENCES Ticket(TicketID),
+    OldStatus nvarchar(max) NOT NULL,
+    NewStatus nvarchar(max) NOT NULL,
+    ChangedBy nvarchar(max) NOT NULL,
+    CreatedOn datetime2 NOT NULL,
+    ModifiedOn datetime2 NOT NULL
+);
+
+CREATE TABLE TicketPriority (
+    PriorityID uniqueidentifier NOT NULL PRIMARY KEY,
+    TicketID uniqueidentifier NOT NULL FOREIGN KEY REFERENCES Ticket(TicketID),
+    OldPriority nvarchar(max) NOT NULL,
+    NewPriority nvarchar(max) NOT NULL,
+    ChangedBy nvarchar(max) NOT NULL,
+    CreatedOn datetime2 NOT NULL,
+    ModifiedOn datetime2 NOT NULL
+);
+
+CREATE TABLE TicketRating (
+    RatingID uniqueidentifier NOT NULL PRIMARY KEY,
+    TicketID uniqueidentifier NOT NULL FOREIGN KEY REFERENCES Ticket(TicketID),
+    UserID uniqueidentifier NOT NULL,
+    Rating int NOT NULL,
+    Feedback nvarchar(max) NOT NULL
+);
+
+CREATE TABLE TicketSLA (
+    SLAID uniqueidentifier NOT NULL PRIMARY KEY,
+    TicketID uniqueidentifier NOT NULL FOREIGN KEY REFERENCES Ticket(TicketID),
+    AgreementType nvarchar(max) NOT NULL,
+    ResponseTime time NOT NULL,
+    ResolutionTime time NOT NULL,
+    IsViolated bit NOT NULL
+);
+
+CREATE TABLE TicketCategory (
+    CategoryID uniqueidentifier NOT NULL PRIMARY KEY,
+    TicketID uniqueidentifier NOT NULL FOREIGN KEY REFERENCES Ticket(TicketID),
+    Category nvarchar(max) NOT NULL
+);

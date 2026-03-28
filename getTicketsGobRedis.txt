@@ -1,0 +1,92 @@
+func (r *DBRepository) GetTickets(ctx context.Context) ([]*Ticket, error) {
+
+	// Use Redis cache if available
+	cacheKey := "get_tickets_cache"
+	cached, err := r.rdb.Get(cacheKey).Result()
+	if err == nil {
+		var tickets []*Ticket
+		cachedb := bytes.NewReader([]byte(cached))
+		if err := gob.NewDecoder(cachedb).Decode(&tickets); err != nil {
+			return nil, err
+		}
+		return tickets, nil
+	}
+
+	// If Redis cache not available, fetch data from DB and set Redis cache
+	const query = `
+        SELECT t.ticket_id, t.subject, t.description, t.status, t.priority, t.created_on, t.modified_on, n.note_id, n.content, n.author, n.created_on
+        FROM tickets t
+        LEFT JOIN notes n 
+        ON t.ticket_id = n.ticket_id
+        ORDER BY t.created_on;
+    `
+	rows, err := r.db.Raw(query).Rows()
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	tickets := map[uuid.UUID]*Ticket{}
+	for rows.Next() {
+		var (
+			ticketID                               uuid.UUID
+			subject, description, status, priority string
+			createdOn, modifiedOn                  time.Time
+			noteID                                 uuid.UUID
+			content, author                        sql.NullString
+			noteCreatedOn                          sql.NullTime
+		)
+		if err := rows.Scan(&ticketID, &subject, &description, &status, &priority, &createdOn, &modifiedOn,
+			&noteID, &content, &author, &noteCreatedOn); err != nil {
+			return nil, err
+		}
+		ticket, ok := tickets[ticketID]
+		if !ok {
+			ticket = &Ticket{
+				TicketID:    ticketID,
+				Subject:     subject,
+				Description: description,
+				Status:      status,
+				Priority:    priority,
+				CreatedOn:   createdOn,
+				ModifiedOn:  modifiedOn,
+				Notes:       []*Note{},
+			}
+			tickets[ticketID] = ticket
+		}
+
+		note := &Note{
+			NoteID:    noteID,
+			Content:   content.String,
+			Author:    author.String,
+			CreatedOn: noteCreatedOn.Time,
+			TicketID:  ticketID,
+		}
+
+		if note.Content != "" || note.Author != "" {
+			ticket.Notes = append(ticket.Notes, note)
+		}
+
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	result := make([]*Ticket, 0, len(tickets))
+	for _, ticket := range tickets {
+		result = append(result, ticket)
+	}
+
+	var cacheData bytes.Buffer
+
+	if err := gob.NewEncoder(&cacheData).Encode(result); err != nil {
+		return nil, fmt.Errorf("error encoding cache data: %w", err)
+	}
+
+	// Set Redis cache
+	cacheDuration := time.Minute * 1
+	if err == nil {
+		r.rdb.Set(cacheKey, cacheData.Bytes(), cacheDuration).Err()
+	}
+
+	return result, nil
+}

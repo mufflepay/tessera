@@ -1,0 +1,29 @@
+// Connect to the database
+db, err := sql.Open("postgres", "user=postgres password=postgres dbname=mydb sslmode=disable")
+if err != nil {
+    // Handle error
+}
+
+// Query the database for all sessions associated with the user ID "your_user_id"
+rows, err := db.Query("SELECT * FROM sessions WHERE data->>'user_id' = $1", "your_user_id")
+if err != nil {
+    // Handle error
+}
+defer rows.Close()
+
+// Iterate over the query results and load each session into a Session object
+var userSessions []*session.Session
+for rows.Next() {
+    var id string
+    var data []byte
+    if err := rows.Scan(&id, &data); err != nil {
+        // Handle error
+    }
+    sess, err := store.Load(id, data)
+    if err != nil {
+        // Handle error
+    }
+    userSessions = append(userSessions, sess)
+}
+
+// userSessions contains all sessions associated with the user ID "your_user_id"

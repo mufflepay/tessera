@@ -1,0 +1,95 @@
+package models
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// ==== ENTITIES ==== //
+type Ticket struct {
+	TicketID          uuid.UUID
+	TicketNumber      int
+	ReferenceNumber   uuid.UUID
+	Subject           string
+	Description       string
+	RequestType       string
+	Status            *TicketStatus
+	Priority          *TicketPriority
+	AssignedTo        string
+	AssignedBy        string
+	CreatedBy         string
+	DueDate           time.Time
+	ReOpenedOn        time.Time
+	ArchivedOn        time.Time
+	ResolutionSummary string
+	Rating            *TicketRating
+	SLA               *TicketSLA
+	Categories        *TicketCategory
+	Notes             []*TicketNote
+	Attachments       []*TicketAttachment
+	CreatedOn         time.Time
+	ModifiedOn        time.Time
+	DeletedOn         time.Time
+}
+
+type TicketNote struct {
+	NoteID    uuid.UUID
+	TicketID  uuid.UUID
+	Content   string
+	Author    string
+	CreatedOn time.Time
+}
+
+type TicketAttachment struct {
+	AttachmentID uuid.UUID
+	TicketID     uuid.UUID
+	FileName     string
+	FilePath     string
+	FileType     string
+	FileSize     int
+	CreatedOn    time.Time
+}
+
+type TicketStatus struct {
+	StatusID   uuid.UUID
+	TicketID   uuid.UUID
+	OldStatus  string
+	NewStatus  string
+	ChangedBy  string
+	CreatedOn  time.Time
+	ModifiedOn time.Time
+}
+
+type TicketPriority struct {
+	PriorityID  uuid.UUID
+	TicketID    uuid.UUID
+	OldPriority string
+	NewPriority string
+	ChangedBy   string
+	CreatedOn   time.Time
+	ModifiedOn  time.Time
+}
+
+type TicketRating struct {
+	RatingID uuid.UUID
+	TicketID uuid.UUID
+	UserID   uuid.UUID
+	Rating   int
+	Feedback string
+}
+
+type TicketSLA struct {
+	SLAID          uuid.UUID
+	TicketID       uuid.UUID
+	AgreementType  string
+	ResponseTime   time.Duration
+	ResolutionTime time.Duration
+	IsViolated     bool
+}
+
+type TicketCategory struct {
+	CategoryID uuid.UUID
+	TicketID   uuid.UUID
+	Category   string
+}

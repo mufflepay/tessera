@@ -1,0 +1,188 @@
+package util
+
+import (
+	"errors"
+	"fmt"
+	"github.com/google/uuid"
+	"strings"
+)
+
+type Patch struct {
+	TableName   string
+	Id          uuid.UUID
+	Fields      map[string]interface{}
+	ValidKeys   map[string]bool
+	ExcludeKeys map[string]bool
+	Nested      string
+}
+
+type PatchOpts func(*Patch)
+
+func WithTableName(tableName string) PatchOpts {
+	return func(patch *Patch) {
+		patch.TableName = tableName
+	}
+}
+
+func WithId(id uuid.UUID) PatchOpts {
+	return func(patch *Patch) {
+		patch.Id = id
+	}
+}
+
+func WithFields(fields map[string]interface{}) PatchOpts {
+	return func(patch *Patch) {
+		patch.Fields = fields
+	}
+}
+
+func WithValidKeys(validKeys map[string]bool) PatchOpts {
+	return func(patch *Patch) {
+		patch.ValidKeys = validKeys
+	}
+}
+
+func WithExcludeKeys(excludeKeys map[string]bool) PatchOpts {
+	return func(patch *Patch) {
+		patch.ExcludeKeys = excludeKeys
+	}
+}
+
+func WithNested(nested string) PatchOpts {
+	return func(patch *Patch) {
+		patch.Nested = nested
+	}
+}
+
+func NewPatch(opts ...PatchOpts) *Patch {
+	patch := &Patch{}
+	for _, opt := range opts {
+		opt(patch)
+	}
+	return patch
+}
+
+func (patch *Patch) GetQuery() (string, []interface{}, error) {
+	if err := patch.Validate(); err != nil {
+		return " \n", nil, err
+	}
+
+	var (
+		query    string
+		params   []interface{}
+		numItems int
+	)
+
+	query = fmt.Sprintf("UPDATE %s SET", patch.TableName)
+	i := 1
+	defaultNumFields := len(patch.Fields)
+	for k, v := range patch.Fields {
+		if _, valid := patch.ValidKeys[k]; !valid {
+			fmt.Printf("#1 => invalid %s field: %s \n", patch.TableName, k)
+			continue
+		}
+		switch k {
+		case patch.Nested:
+			nested, ok := patch.Fields[k].([]interface{}) // v.([]interface{})
+			if !ok {
+				fmt.Printf("#2 => invalid %s format: %s \n", patch.TableName, nested)
+				continue
+			}
+			for _, nestedKey := range nested {
+				nestedMap, ok := nestedKey.(map[string]interface{})
+				if !ok {
+					fmt.Printf("#3 => invalid %s format: %s \n", patch.TableName, nested)
+					continue
+				}
+				numFields := len(nestedMap)
+				numItems = 1
+				for k, v := range nestedMap {
+					if _, valid := patch.ValidKeys[k]; !valid {
+						fmt.Printf("#4 => invalid %s field: %s \n", patch.TableName, k)
+						continue
+					}
+					if _, exclude := patch.ExcludeKeys[k]; exclude {
+						fmt.Printf("#5 => invalid %s field: %s \n", patch.TableName, k)
+						continue
+					}
+					query += fmt.Sprintf(" %s = ?", k)
+					params = append(params, v)
+					if numItems < numFields {
+						query += ","
+					}
+					numItems++
+				}
+			}
+		default:
+			if _, exclude := patch.ExcludeKeys[k]; exclude {
+				fmt.Printf("#6 => invalid %s field: %s \n", patch.TableName, k)
+				continue
+			}
+			query += fmt.Sprintf(" %s = ?,", k)
+			params = append(params, v)
+			if i < defaultNumFields {
+				query += ","
+			}
+			i++
+		}
+	}
+
+	query = strings.TrimSuffix(query, ",") // remove the last comma if it exists
+	fmt.Printf("initial query: %s -> %s \n", query, patch.TableName)
+
+	return query, params, nil
+}
+
+// Validate checks whether the patch object is valid or not
+func (patch *Patch) Validate() error {
+	if patch.TableName == "" {
+		return errors.New("missing table name")
+	}
+	//if patch.Id == uuid.Nil {
+	//	return errors.New("missing id")
+	//}
+	if patch.Fields == nil {
+		return errors.New("missing fields")
+	}
+	if patch.ValidKeys == nil {
+		return errors.New("missing valid keys")
+	}
+
+	if patch.ExcludeKeys == nil {
+		return errors.New("missing exclude keys")
+	}
+	//if patch.Nested == "" {
+	//	return errors.New("missing nested field")
+	//}
+	return nil
+}
+
+//func main() {
+//	//Create a new patch with patch options
+//	p := NewPatch(
+//		WithTableName("users"),
+//		WithId(uuid.MustParse("a7ee670c-93f9-4e84-96b4-f33149c0b2ab")),
+//		WithFields(map[string]interface{}{
+//			"first_name": "John",
+//		}),
+//		WithValidKeys(map[string]bool{
+//			"first_name": true,
+//		}),
+//	)
+//
+//	// Get the SQL query and its parameters
+//	query, args, err := p.GetQuery()
+//	if err != nil {
+//		log.Printf("error generating patch query: %v", err)
+//	}
+//
+//	fmt.Printf("the query: %v", query)
+//	fmt.Printf("the args: %v", args...)
+//
+//	// Execute the patch using the generated SQL query and parameters
+//	//var rows, err = tx.Raw(query, args...).Rows()
+//	//if err != nil {
+//	tx.Rollback()
+//	//	fmt.Printf("error patching rows: %v", err)
+//	//}
+//}

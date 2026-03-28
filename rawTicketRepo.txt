@@ -1,0 +1,873 @@
+package repos
+
+import (
+	"backend/models"
+	"context"
+	"database/sql"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/go-redis/redis"
+	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
+	"gorm.io/gorm"
+)
+
+type ITicketRepository interface {
+	CreateTicket(ctx context.Context, ticket *models.Ticket) (*models.Ticket, error)
+	GetTicketByID(ctx context.Context, ticketID uuid.UUID) (*models.Ticket, error)
+	GetTickets(ctx context.Context) ([]*models.Ticket, error)
+	PatchTicket(ctx context.Context, ticketID uuid.UUID, fields map[string]interface{}) (*models.Ticket, error)
+	DeleteTicket(ctx context.Context, ticketID uuid.UUID) (uuid.UUID, error)
+}
+
+type ticketRepository struct {
+	db  *gorm.DB
+	rdb *redis.Client
+}
+
+func NewTicketRepository(db *gorm.DB, rdb *redis.Client) ITicketRepository {
+	return &ticketRepository{db: db, rdb: rdb}
+}
+
+// CreateTicket is a repository that helps to create tickets
+func (r *ticketRepository) CreateTicket(ctx context.Context, ticket *models.Ticket) (*models.Ticket, error) {
+	// Get the current time stamp
+	now := time.Now()
+
+	// Insert the ticket into the database
+	query := `INSERT INTO tickets 
+	(subject, description, request_type, assigned_to, assigned_by, created_by, due_date, created_on, modified_on) 
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) 
+	RETURNING ticket_id, subject, description, request_type, assigned_to, assigned_by, created_by, due_date, created_on, modified_on`
+
+	rows, err := r.db.Raw(query, ticket.Subject, ticket.Description, ticket.RequestType, ticket.AssignedTo, ticket.AssignedBy, ticket.CreatedBy, ticket.DueDate, now, now).Rows()
+	if err != nil {
+		return nil, fmt.Errorf("error inserting ticket: %v", err)
+	}
+	defer rows.Close()
+
+	if rows.Next() {
+		if err := rows.Scan(&ticket.TicketID, &ticket.Subject, &ticket.Description, &ticket.RequestType, &ticket.AssignedTo, &ticket.AssignedBy, &ticket.CreatedBy, &ticket.DueDate, &ticket.CreatedOn, &ticket.ModifiedOn); err != nil {
+			return nil, fmt.Errorf("error scanning ticket: %v", err)
+		}
+	}
+
+	g, ctx := errgroup.WithContext(ctx)
+
+	// Create channels to receive notes, attachments, status and priority
+	noteChan := make(chan *models.TicketNote, len(ticket.Notes))
+	attachmentChan := make(chan *models.TicketAttachment, len(ticket.Attachments))
+	statusChan := make(chan *models.TicketStatus, 1)
+	priorityChan := make(chan *models.TicketPriority, 1)
+
+	// Create a waitgroup to wait for all goroutines to finish
+	var wg sync.WaitGroup
+	wg.Add(4)
+
+	// Launch a goroutine to insert notes
+	g.Go(func() error {
+		defer wg.Done()
+		note := ticket.Notes[len(ticket.Notes)-1]
+		query := `INSERT INTO notes(ticket_id, content, author, created_on) VALUES (?, ?, ?, ?) RETURNING note_id, ticket_id, content, author, created_on`
+		rows, err := r.db.Raw(query, ticket.TicketID, note.Content, note.Author, now).Rows()
+		if err != nil {
+			return fmt.Errorf("error inserting note: %v", err)
+		}
+		defer rows.Close()
+		if rows.Next() {
+			if err := rows.Scan(&note.NoteID, &note.TicketID, &note.Content, &note.Author, &note.CreatedOn); err != nil {
+
+				return fmt.Errorf("error scanning note: %v", err)
+			}
+		}
+		if note.NoteID != ticket.Notes[len(ticket.Notes)-1].NoteID {
+			ticket.Notes = append(ticket.Notes, note)
+		}
+
+		select {
+		case noteChan <- note:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
+		return nil
+	})
+
+	g.Go(func() error {
+		defer wg.Done()
+		attachment := ticket.Attachments[len(ticket.Attachments)-1]
+		query := `INSERT INTO attachments(ticket_id, file_name, file_path, file_type, file_size, created_on) VALUES (?, ?, ?, ?, ?, ?) RETURNING attachment_id, ticket_id, file_name, file_path, file_type, file_size, created_on`
+		rws, err := r.db.Raw(query, ticket.TicketID, attachment.FileName, attachment.FilePath, attachment.FileType, attachment.FileSize, now).Rows()
+		if err != nil {
+			return fmt.Errorf("error inserting attachment: %v", err)
+		}
+		defer rws.Close()
+		if rws.Next() {
+			if err := rws.Scan(&attachment.AttachmentID, &attachment.TicketID, &attachment.FileName, &attachment.FilePath, &attachment.FileType, &attachment.FileSize, &attachment.CreatedOn); err != nil {
+
+				return fmt.Errorf("error scanning attachment: %v", err)
+
+			}
+		}
+		if attachment.AttachmentID != ticket.Attachments[len(ticket.Attachments)-1].AttachmentID {
+			ticket.Attachments = append(ticket.Attachments, attachment)
+		}
+		select {
+		case attachmentChan <- attachment:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return nil
+	})
+
+	// Insert the status for the new ticket
+	g.Go(func() error {
+		defer wg.Done()
+		status := ticket.Status
+		query := `
+		INSERT INTO ticket_statuses(ticket_id, old_status, new_status, changed_by, created_on, modified_on)
+		VALUES (?, ?, ?, ?, ?, ?)
+		RETURNING status_id, ticket_id, old_status, new_status, changed_by, created_on, modified_on`
+
+		rows, err := r.db.Raw(query, ticket.TicketID, status.OldStatus, status.NewStatus, status.ChangedBy, now, now).Rows()
+		if err != nil {
+			return fmt.Errorf("error inserting status: %v", err)
+		}
+		defer rows.Close()
+
+		if rows.Next() {
+			var statusOld sql.NullString
+			if err := rows.Scan(&status.StatusID, &status.TicketID, &statusOld, &status.NewStatus, &status.ChangedBy, &status.CreatedOn, &status.ModifiedOn); err != nil {
+
+				return fmt.Errorf("error scanning status: %v", err)
+
+			}
+
+			if statusOld.Valid {
+				status.OldStatus = statusOld.String
+			} else {
+				status.OldStatus = ""
+			}
+		}
+
+		if status.StatusID != ticket.Status.StatusID {
+			ticket.Status = status
+		}
+
+		select {
+		case statusChan <- status:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
+		return nil
+	})
+
+	// Insert the priority for the new ticket
+	g.Go(func() error {
+		defer wg.Done()
+		priority := ticket.Priority
+		query := `
+		INSERT INTO ticket_priorities(ticket_id, old_priority, new_priority, changed_by, created_on, modified_on)
+		VALUES (?, ?, ?, ?, ?, ?)
+		RETURNING priority_id, ticket_id, old_priority, new_priority, changed_by, created_on, modified_on`
+
+		rows, err := r.db.Raw(query, ticket.TicketID, priority.OldPriority, priority.NewPriority, priority.ChangedBy, now, now).Rows()
+		if err != nil {
+			return fmt.Errorf("error inserting priority: %v", err)
+
+		}
+		defer rows.Close()
+
+		if rows.Next() {
+			var priorityOld sql.NullString
+			if err := rows.Scan(&priority.PriorityID, &priority.TicketID, &priorityOld, &priority.NewPriority, &priority.ChangedBy, &priority.CreatedOn, &priority.ModifiedOn); err != nil {
+				return fmt.Errorf("error scanning priority: %v", err)
+			}
+
+			if priorityOld.Valid {
+				priority.OldPriority = priorityOld.String
+			} else {
+				priority.OldPriority = ""
+			}
+		}
+
+		if priority.PriorityID != ticket.Priority.PriorityID {
+			ticket.Priority = priority
+		}
+		select {
+		case priorityChan <- priority:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return nil
+	})
+
+	// fmt.Println("priorityChany", <-priorityChan)
+
+	go func() {
+		wg.Wait()
+		g.Wait()
+		close(noteChan)
+		close(attachmentChan)
+		close(statusChan)
+		close(priorityChan)
+	}()
+
+	if err := g.Wait(); err != nil {
+		return nil, fmt.Errorf("errGrp => %v", err)
+	}
+
+	return ticket, nil
+}
+
+func (r *ticketRepository) GetTicketByID(ctx context.Context, ticketID uuid.UUID) (*models.Ticket, error) {
+
+	var ticket = &models.Ticket{}
+
+	// Get the ticket with notes, attachments, status and priority
+	query := `
+	SELECT 
+	t.ticket_id, t.subject, t.description, t.request_type,	
+	s.status_id, s.ticket_id, s.old_status, s.new_status, s.changed_by, s.created_on, s.modified_on,
+	p.priority_id, p.ticket_id, p.old_priority, p.new_priority, p.changed_by, p.created_on, p.modified_on,
+	t.assigned_to, t.assigned_by, t.created_by, t.due_date, 
+	n.note_id, n.ticket_id, n.content, n.author, n.created_on,
+	a.attachment_id, a.ticket_id, a.file_name, a.file_path, a.file_type, a.file_size, a.created_on,
+	t.created_on, t.modified_on
+	FROM tickets t
+	LEFT JOIN ticket_statuses s ON t.ticket_id = s.ticket_id
+	LEFT JOIN ticket_priorities p ON t.ticket_id = p.ticket_id
+	LEFT JOIN notes n ON t.ticket_id = n.ticket_id
+	LEFT JOIN attachments a ON t.ticket_id = a.ticket_id
+	WHERE t.ticket_id = ?
+	ORDER BY t.ticket_id, s.created_on, p.created_on, n.created_on, a.created_on
+	`
+
+	rows, err := r.db.Raw(query, ticketID).Rows()
+	if err != nil {
+		return nil, fmt.Errorf("error getting ticket: %v", err)
+	}
+	defer rows.Close()
+
+	var (
+		note       = &models.TicketNote{}
+		attachment = &models.TicketAttachment{}
+		status     = &models.TicketStatus{}
+		priority   = &models.TicketPriority{}
+	)
+
+	for rows.Next() {
+		if err := rows.Scan(&ticket.TicketID, &ticket.Subject, &ticket.Description, &ticket.RequestType,
+			&status.StatusID, &status.TicketID, &status.OldStatus, &status.NewStatus, &status.ChangedBy, &status.CreatedOn, &status.ModifiedOn,
+			&priority.PriorityID, &priority.TicketID, &priority.OldPriority, &priority.NewPriority, &priority.ChangedBy, &priority.CreatedOn, &priority.ModifiedOn,
+			&ticket.AssignedTo, &ticket.AssignedBy, &ticket.CreatedBy, &ticket.DueDate,
+			&note.NoteID, &note.TicketID, &note.Content, &note.Author, &note.CreatedOn,
+			&attachment.AttachmentID, &attachment.TicketID, &attachment.FileName, &attachment.FilePath, &attachment.FileType, &attachment.FileSize, &attachment.CreatedOn,
+			&ticket.CreatedOn, &ticket.ModifiedOn); err != nil {
+			return nil, fmt.Errorf("error scanning ticket: %v", err)
+		}
+
+		if status.StatusID != uuid.Nil {
+			ticket.Status = status
+		}
+
+		if priority.PriorityID != uuid.Nil {
+			ticket.Priority = priority
+		}
+
+		if note.NoteID != uuid.Nil {
+			ticket.Notes = append(ticket.Notes, note)
+		}
+
+		if attachment.AttachmentID != uuid.Nil {
+			ticket.Attachments = append(ticket.Attachments, attachment)
+		}
+	}
+
+	return ticket, nil
+}
+
+func (r *ticketRepository) GetTickets(ctx context.Context) ([]*models.Ticket, error) {
+	var tickets []*models.Ticket
+
+	// Get the ticket with notes, attachments, status and priority
+	query := `
+	SELECT 
+	t.ticket_id, t.subject, t.description, t.request_type,	
+	s.status_id, s.ticket_id, s.old_status, s.new_status, s.changed_by, s.created_on, s.modified_on,
+	p.priority_id, p.ticket_id, p.old_priority, p.new_priority, p.changed_by, p.created_on, p.modified_on,
+	t.assigned_to, t.assigned_by, t.created_by, t.due_date, 
+	n.note_id, n.ticket_id, n.content, n.author, n.created_on,
+	a.attachment_id, a.ticket_id, a.file_name, a.file_path, a.file_type, a.file_size, a.created_on,
+	t.created_on, t.modified_on
+	FROM tickets t
+	LEFT JOIN ticket_statuses s ON t.ticket_id = s.ticket_id
+	LEFT JOIN ticket_priorities p ON t.ticket_id = p.ticket_id
+	LEFT JOIN notes n ON t.ticket_id = n.ticket_id
+	LEFT JOIN attachments a ON t.ticket_id = a.ticket_id
+	ORDER BY t.ticket_id, s.created_on, p.created_on, n.created_on, a.created_on
+	`
+
+	rows, err := r.db.Raw(query).Rows()
+	if err != nil {
+		return nil, fmt.Errorf("error getting ticket: %v", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			ticket     = &models.Ticket{}
+			note       = &models.TicketNote{}
+			attachment = &models.TicketAttachment{}
+			status     = &models.TicketStatus{}
+			priority   = &models.TicketPriority{}
+		)
+
+		if err := rows.Scan(&ticket.TicketID, &ticket.Subject, &ticket.Description, &ticket.RequestType,
+			&status.StatusID, &status.TicketID, &status.OldStatus, &status.NewStatus, &status.ChangedBy, &status.CreatedOn, &status.ModifiedOn,
+			&priority.PriorityID, &priority.TicketID, &priority.OldPriority, &priority.NewPriority, &priority.ChangedBy, &priority.CreatedOn, &priority.ModifiedOn,
+			&ticket.AssignedTo, &ticket.AssignedBy, &ticket.CreatedBy, &ticket.DueDate,
+			&note.NoteID, &note.TicketID, &note.Content, &note.Author, &note.CreatedOn,
+			&attachment.AttachmentID, &attachment.TicketID, &attachment.FileName, &attachment.FilePath, &attachment.FileType, &attachment.FileSize, &attachment.CreatedOn,
+			&ticket.CreatedOn, &ticket.ModifiedOn); err != nil {
+			return nil, fmt.Errorf("error scanning ticket: %v", err)
+		}
+
+		if status.StatusID != uuid.Nil {
+			ticket.Status = status
+		}
+
+		if priority.PriorityID != uuid.Nil {
+			ticket.Priority = priority
+		}
+
+		if note.NoteID != uuid.Nil {
+			ticket.Notes = append(ticket.Notes, note)
+		}
+
+		if attachment.AttachmentID != uuid.Nil {
+			ticket.Attachments = append(ticket.Attachments, attachment)
+		}
+
+		tickets = append(tickets, ticket)
+
+	}
+
+	return tickets, nil
+}
+
+// ValidateMap to validate the fields=>map[string]interface{}
+func (r *ticketRepository) PatchTicket(ctx context.Context, ticketID uuid.UUID, fields map[string]interface{}) (*models.Ticket, error) {
+
+	tx := r.db.Begin()
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// Build the query
+	query := "UPDATE tickets SET"
+	params := []interface{}{}
+	i := 1
+	numFields := len(fields)
+	validKeys := map[string]bool{
+		"ticket_id":    true,
+		"subject":      true,
+		"description":  true,
+		"request_type": true,
+		"status":       true,
+		"priority":     true,
+		"assigned_to":  true,
+		"assigned_by":  true,
+		"created_by":   true,
+		"due_date":     true,
+		"notes":        true,
+		"attachments":  true,
+		"created_on":   true,
+		"modified_on":  true,
+	}
+	for k, v := range fields {
+		if _, ok := validKeys[k]; !ok {
+			fmt.Printf("#1 => invalid ticket field: %s", k)
+			continue
+		}
+		// Don't update the created_by, created_on, due_date fields (excludeKeys)
+		query += fmt.Sprintf(" %s = ?", k)
+		params = append(params, v)
+		if i < numFields {
+			query += ","
+		}
+		i++
+	}
+
+	query += " modified_on = ? WHERE ticket_id = ? RETURNING ticket_id, subject, description, request_type, assigned_to, assigned_by, created_by, due_date, created_on, modified_on"
+
+	// Add the ticketID to the params
+	params = append(params, time.Now())
+	params = append(params, ticketID)
+
+	// Execute the query
+	rows, err := tx.Raw(query, params...).Rows()
+	if err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("error patching ticket: %v", err)
+	}
+	defer rows.Close()
+
+	// Scan the result into a new ticket struct
+	ticket := &models.Ticket{}
+	for rows.Next() {
+		if err := rows.Scan(&ticket.TicketID, &ticket.Subject, &ticket.Description, &ticket.RequestType, &ticket.AssignedTo, &ticket.AssignedBy, &ticket.CreatedBy, &ticket.DueDate, &ticket.CreatedOn, &ticket.ModifiedOn); err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("error scanning ticket: %v", err)
+		}
+	}
+
+	// Build the query to update the notes
+	query = "UPDATE notes SET"
+	notesParams := []interface{}{}
+	validNotesKeys := map[string]bool{
+		"notes":      true,
+		"note_id":    true,
+		"ticket_id":  true,
+		"content":    true,
+		"author":     true,
+		"created_on": true,
+	}
+
+	for k := range fields {
+		if _, ok := validNotesKeys[k]; !ok {
+			fmt.Printf("#1 => invalid note field: %s", k)
+			continue
+		}
+		if k == "notes" {
+			for _, note := range fields[k].([]interface{}) {
+				noteMap := note.(map[string]interface{})
+				numNoteFields := len(noteMap)
+				noteI := 1
+				for k, v := range noteMap {
+					if _, ok := validNotesKeys[k]; !ok {
+						fmt.Printf("#2 => invalid note field: %s", k)
+						continue
+					}
+					query += fmt.Sprintf(" %s = ?", k)
+					notesParams = append(notesParams, v)
+					if noteI < numNoteFields {
+						query += ","
+					}
+					noteI++
+				}
+			}
+		} else {
+			query += fmt.Sprintf(" %s = ?,", k)
+			notesParams = append(notesParams, fields[k])
+		}
+	}
+
+	query = strings.TrimSuffix(query, ",") // remove the last comma if it exists
+	query += " WHERE ticket_id = ? RETURNING note_id, ticket_id, content, author, created_on"
+
+	// Add the ticketID to the params
+	notesParams = append(notesParams, ticketID)
+
+	// Execute the query
+	if len(notesParams) > 1 {
+		rows, err = tx.Raw(query, notesParams...).Rows()
+		if err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("error patching ticket: %v", err)
+		}
+		defer rows.Close()
+
+		// Scan the result into a new note struct
+		note := &models.TicketNote{}
+		for rows.Next() {
+			if err := rows.Scan(&note.NoteID, &note.TicketID, &note.Content, &note.Author, &note.CreatedOn); err != nil {
+				tx.Rollback()
+				return nil, fmt.Errorf("error scanning note: %v", err)
+			}
+
+			// Append the note to the ticket
+			ticket.Notes = append(ticket.Notes, note)
+		}
+	}
+
+	// Build the query to update the ticket attachments
+	query = "UPDATE attachments SET"
+	attachmentsParams := []interface{}{}
+	validAttachmentsKeys := map[string]bool{
+		"attachments":   true,
+		"attachment_id": true,
+		"ticket_id":     true,
+		"file_name":     true,
+		"file_type":     true,
+		"file_size":     true,
+		"file_path":     true,
+		"created_on":    true,
+	}
+
+	for k := range fields {
+		if _, ok := validAttachmentsKeys[k]; !ok {
+			fmt.Printf("#1 => invalid attachment field: %s", k)
+			continue
+		}
+		if k == "attachments" {
+			for _, attachment := range fields[k].([]interface{}) {
+				attachmentMap := attachment.(map[string]interface{})
+				numAttachmentFields := len(attachmentMap)
+				attachmentI := 1
+				for k, v := range attachmentMap {
+					if _, ok := validAttachmentsKeys[k]; !ok {
+						fmt.Printf("#2 => invalid attachment field: %s", k)
+						continue
+					}
+					query += fmt.Sprintf(" %s = ?", k)
+					attachmentsParams = append(attachmentsParams, v)
+					if attachmentI < numAttachmentFields {
+						query += ","
+					}
+					attachmentI++
+				}
+			}
+		} else {
+			query += fmt.Sprintf(" %s = ?,", k)
+			attachmentsParams = append(attachmentsParams, fields[k])
+		}
+	}
+
+	query = strings.TrimSuffix(query, ",") // remove the last comma if it exists
+	query += " WHERE ticket_id = ? RETURNING attachment_id, ticket_id, file_name, file_type, file_size, file_path, created_on"
+
+	// Add the ticketID to the params
+	attachmentsParams = append(attachmentsParams, ticketID)
+
+	if len(attachmentsParams) > 1 {
+		// Execute the query
+		rows, err = tx.Raw(query, attachmentsParams...).Rows()
+		if err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("error patching ticket: %v", err)
+		}
+		defer rows.Close()
+
+		// Scan the result into a new attachment struct
+		attachment := &models.TicketAttachment{}
+		for rows.Next() {
+			if err := rows.Scan(&attachment.AttachmentID, &attachment.TicketID, &attachment.FileName, &attachment.FileType, &attachment.FileSize, &attachment.FilePath, &attachment.CreatedOn); err != nil {
+				tx.Rollback()
+				return nil, fmt.Errorf("error scanning attachment: %v", err)
+			}
+
+			// Append the attachment to the ticket
+			ticket.Attachments = append(ticket.Attachments, attachment)
+		}
+
+	}
+
+	// Build the query to update the ticket statuses
+	query = "UPDATE ticket_statuses SET"
+	statusesParams := []interface{}{}
+	validStatusesKeys := map[string]bool{
+		"status":      true,
+		"status_id":   true,
+		"ticket_id":   true,
+		"old_status":  true,
+		"new_status":  true,
+		"changed_by":  true,
+		"created_on":  true,
+		"modified_on": true,
+	}
+
+	for k := range fields {
+		if _, ok := validStatusesKeys[k]; !ok {
+			fmt.Printf("#1 => invalid status field: %s", k)
+			continue
+		}
+		if k == "status" {
+			for _, status := range fields[k].([]interface{}) {
+				statusMap := status.(map[string]interface{})
+				numStatusFields := len(statusMap)
+				statusI := 1
+				for k, v := range statusMap {
+					if _, ok := validStatusesKeys[k]; !ok {
+						fmt.Printf("#2 => invalid status field: %s", k)
+						continue
+					}
+					query += fmt.Sprintf(" %s = ?", k)
+					statusesParams = append(statusesParams, v)
+					if statusI < numStatusFields {
+						query += ","
+					}
+					statusI++
+				}
+			}
+		} else {
+			query += fmt.Sprintf(" %s = ?,", k)
+			statusesParams = append(statusesParams, fields[k])
+		}
+	}
+
+	// Remove the last comma if it exists from the query
+	query = strings.TrimSuffix(query, ",")
+
+	// Add WHERE clause to the query
+	query += ", old_status = (SELECT new_status FROM ticket_statuses WHERE ticket_id = ?)  , modified_on = ? WHERE ticket_id = ? RETURNING status_id, ticket_id, old_status, new_status, changed_by, created_on, modified_on"
+
+	// Add the ticketID to the params
+	statusesParams = append(statusesParams, ticketID)
+	statusesParams = append(statusesParams, time.Now())
+	statusesParams = append(statusesParams, ticketID)
+
+	if len(statusesParams) > 3 {
+		// Execute the query
+		rows, err = tx.Raw(query, statusesParams...).Rows()
+		if err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("error patching ticket status: %v", err)
+		}
+		defer rows.Close()
+
+		// Scan the result into a new ticket status struct
+		for rows.Next() {
+			status := &models.TicketStatus{}
+			if err := rows.Scan(&status.StatusID, &status.TicketID, &status.OldStatus, &status.NewStatus, &status.ChangedBy, &status.CreatedOn, &status.ModifiedOn); err != nil {
+				tx.Rollback()
+				return nil, fmt.Errorf("error scanning ticket status: %v", err)
+			}
+
+			// Append the status to the ticket
+			ticket.Status = status
+		}
+	}
+
+	// Build the query to update the ticket priorities
+	query = "UPDATE ticket_priorities SET"
+	prioritiesParams := []interface{}{}
+	validPrioritiesKeys := map[string]bool{
+		"priority":     true,
+		"priority_id":  true,
+		"ticket_id":    true,
+		"old_priority": true,
+		"new_priority": true,
+		"changed_by":   true,
+		"created_on":   true,
+		"modified_on":  true,
+	}
+	for k := range fields {
+		if _, ok := validPrioritiesKeys[k]; !ok {
+			fmt.Printf("#1 => invalid priority field: %s", k)
+			continue
+		}
+		if k == "priority" {
+			for _, priority := range fields[k].([]interface{}) {
+				priorityMap := priority.(map[string]interface{})
+				numPriorityFields := len(priorityMap)
+				priorityI := 1
+				for k, v := range priorityMap {
+					if _, ok := validPrioritiesKeys[k]; !ok {
+						fmt.Printf("#2 => invalid priority field: %s", k)
+						continue
+					}
+					query += fmt.Sprintf(" %s = ?", k)
+					prioritiesParams = append(prioritiesParams, v)
+					if priorityI < numPriorityFields {
+						query += ","
+					}
+					priorityI++
+				}
+			}
+		} else {
+			query += fmt.Sprintf(" %s = ?,", k)
+			prioritiesParams = append(prioritiesParams, fields[k])
+		}
+	}
+
+	// Remove the last comma if it exists from the query
+	query = strings.TrimSuffix(query, ",")
+
+	// Add WHERE clause to the query
+	query += ", old_priority = (SELECT new_priority FROM ticket_priorities WHERE ticket_id = ?)  , modified_on = ? WHERE ticket_id = ? RETURNING priority_id, ticket_id, old_priority, new_priority, changed_by, created_on, modified_on"
+
+	// Add the ticketID to the params
+	prioritiesParams = append(prioritiesParams, ticketID)
+	prioritiesParams = append(prioritiesParams, time.Now())
+	prioritiesParams = append(prioritiesParams, ticketID)
+
+	if len(prioritiesParams) > 3 {
+		// Execute the query
+		rows, err = tx.Raw(query, prioritiesParams...).Rows()
+		if err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("error patching ticket priority: %v", err)
+		}
+		defer rows.Close()
+
+		// Scan the result into a new ticket priority struct
+		for rows.Next() {
+			priority := &models.TicketPriority{}
+			if err := rows.Scan(&priority.PriorityID, &priority.TicketID, &priority.OldPriority, &priority.NewPriority, &priority.ChangedBy, &priority.CreatedOn, &priority.ModifiedOn); err != nil {
+				tx.Rollback()
+				return nil, fmt.Errorf("error scanning ticket priority: %v", err)
+			}
+
+			// Append the priority to the ticket
+			ticket.Priority = priority
+		}
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("error committing transaction: %v", err)
+	}
+
+	return ticket, nil
+}
+
+func (r *ticketRepository) DeleteTicket(ctx context.Context, ticketID uuid.UUID) (uuid.UUID, error) {
+	tx := r.db.Begin()
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// Not complete yet, not sure I need to delete tickets
+	query := `
+		DELETE FROM tickets
+		WHERE ticket_id = ?
+		RETURNING ticket_id
+	`
+
+	if err := tx.Exec(query, ticketID).Error; err != nil {
+		tx.Rollback()
+		return uuid.UUID{}, fmt.Errorf("error deleting ticket: %v", err)
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		tx.Rollback()
+		return uuid.UUID{}, fmt.Errorf("error committing transaction: %v", err)
+	}
+
+	return ticketID, nil
+}
+
+
+// SWITCH CASE WONT WORK BECAUSE IF ONE FIELD IS VALID IT WILL EXECUTE THE QUERY AND SKIP THE REST
+func (r *ticketRepository) PatchTicket(ctx context.Context, ticketID uuid.UUID, fields map[string]interface{}) error {
+
+	tx := r.db.Begin()
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
+	for k, v := range fields {
+		switch k {
+		case "subject":
+			if subject, ok := v.(string); ok {
+				query := `UPDATE tickets SET subject = ? WHERE ticket_id = ?`
+				if err := tx.Exec(query, subject, ticketID).Error; err != nil {
+					tx.Rollback()
+					return fmt.Errorf("error updating ticket: %v", err)
+				}
+			}
+		case "description":
+			if description, ok := v.(string); ok {
+				query := `UPDATE tickets SET description = ? WHERE ticket_id = ?`
+				if err := tx.Exec(query, description, ticketID).Error; err != nil {
+					tx.Rollback()
+					return fmt.Errorf("error updating ticket: %v", err)
+				}
+			}
+		case "request_type":
+			if requestType, ok := v.(string); ok {
+				query := `UPDATE tickets SET request_type = ? WHERE ticket_id = ?`
+				if err := tx.Exec(query, requestType, ticketID).Error; err != nil {
+					tx.Rollback()
+					return fmt.Errorf("error updating ticket: %v", err)
+				}
+			}
+		case "status":
+			if status, ok := v.(*models.TicketStatus); ok {
+				query := `UPDATE ticket_statuses SET new_status = ? WHERE ticket_id = ?`
+				if err := tx.Exec(query, status.NewStatus, ticketID).Error; err != nil {
+					tx.Rollback()
+					return fmt.Errorf("error updating ticket: %v", err)
+				}
+			}
+		case "priority":
+			if priority, ok := v.(*models.TicketPriority); ok {
+				query := `UPDATE ticket_priorities SET new_priority = ?, changed_by = ? WHERE ticket_id = ?`
+				if err := tx.Exec(query, priority.NewPriority, priority.ChangedBy, ticketID).Error; err != nil {
+					tx.Rollback()
+					return fmt.Errorf("error updating ticket: %v", err)
+				}
+			}
+		case "assigned_to":
+			if assignedTo, ok := v.(string); ok {
+				query := `UPDATE tickets SET assigned_to = ? WHERE ticket_id = ?`
+				if err := tx.Exec(query, assignedTo, ticketID).Error; err != nil {
+					tx.Rollback()
+					return fmt.Errorf("error updating ticket: %v", err)
+				}
+			}
+		case "assigned_by":
+			if assignedBy, ok := v.(string); ok {
+				query := `UPDATE tickets SET assigned_by = ? WHERE ticket_id = ?`
+				if err := tx.Exec(query, assignedBy, ticketID).Error; err != nil {
+					tx.Rollback()
+					return fmt.Errorf("error updating ticket: %v", err)
+				}
+			}
+		case "created_by":
+			if createdBy, ok := v.(string); ok {
+				query := `UPDATE tickets SET created_by = ? WHERE ticket_id = ?`
+				if err := tx.Exec(query, createdBy, ticketID).Error; err != nil {
+					tx.Rollback()
+					return fmt.Errorf("error updating ticket: %v", err)
+				}
+			}
+		case "due_date":
+			if dueDate, ok := v.(time.Time); ok {
+				query := `UPDATE tickets SET due_date = ? WHERE ticket_id = ?`
+				if err := tx.Exec(query, dueDate, ticketID).Error; err != nil {
+					tx.Rollback()
+					return fmt.Errorf("error updating ticket: %v", err)
+				}
+			}
+		case "notes":
+			if notes, ok := v.([]*models.Note); ok {
+				query := `UPDATE notes SET content = ? WHERE ticket_id = ?`
+				for _, note := range notes {
+					if err := tx.Exec(query, note.Content, ticketID).Error; err != nil {
+						tx.Rollback()
+						return fmt.Errorf("error updating ticket: %v", err)
+					}
+				}
+			}
+		case "attachments":
+			if attachments, ok := v.([]*models.Attachment); ok {
+				query := `UPDATE attachments SET file_name = ?, file_path = ?, file_type = ?, file_size = ? WHERE ticket_id = ?`
+				for _, attachment := range attachments {
+					if err := tx.Exec(query, attachment.FileName, attachment.FilePath, attachment.FileType, attachment.FileSize, ticketID).Error; err != nil {
+						tx.Rollback()
+						return fmt.Errorf("error updating ticket: %v", err)
+					}
+				}
+			}
+		}
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		tx.Rollback()
+		return fmt.Errorf("error committing transaction: %v", err)
+	}
+
+	return nil
+}
