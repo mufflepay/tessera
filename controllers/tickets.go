@@ -1,10 +1,10 @@
 package controllers
 
 import (
-	"backend/models"
-	"backend/repos"
-	"backend/util"
-	"backend/util/cloudStorage"
+	"tessera/models"
+	"tessera/repos"
+	"tesserautil"
+	"tessera/util/cloudStorage"
 	"context"
 	"fmt"
 	"github.com/google/uuid"
