@@ -1,7 +1,7 @@
 package repos
 
 import (
-	"backend/models"
+	"tessera/models"
 	"context"
 	"fmt"
 	"strings"
