@@ -1,8 +1,8 @@
 package util
 
 import (
-	"backend/config"
-	"backend/models"
+	"tessera/config"
+	"tessera/models"
 	"bytes"
 	"crypto/tls"
 	"fmt"
