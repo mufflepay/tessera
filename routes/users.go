@@ -1,8 +1,8 @@
 package routes
 
 import (
-	"backend/controllers"
-	"backend/middlewares"
+	"tessera/controllers"
+	"tessera/middlewares"
 
 	"github.com/gofiber/fiber/v2"
 )
